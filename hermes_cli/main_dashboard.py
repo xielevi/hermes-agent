@@ -394,7 +394,32 @@ def _respawnable_command_for_current_install(argv: list[str]) -> list[str]:
             and os.path.basename(argv[1]) == "hermes" and Path(argv[1]) != root / "hermes"):
         from hermes_cli._launchers import runtime_command
         return runtime_command(root, argv[2:])
-    return list(argv)
+    rebuilt = _rebuilt_inline_source_command(argv, root)
+    return rebuilt if rebuilt is not None else list(argv)
+
+
+def _rebuilt_inline_source_command(argv: list[str], root) -> list[str] | None:
+    """Rebuild a ``python -I -c <bootstrap> …`` argv captured through ``ps``, or None.
+
+    macOS has no ``/proc``, so ``_dashboard_cmdline_for_pid`` reads ``ps -o command=``: one
+    space-joined line, re-split with ``shlex``. A backend's multi-line bootstrap becomes hundreds
+    of fragments and ``-c`` receives the first one (``import``) — the respawned child dies with a
+    ``SyntaxError`` inside the liveness grace, the backend is booked "not brought back", and the
+    update ends owing a follow-up although nothing gateway-shaped failed. Resolve the fragments
+    back through the structured extractor and re-emit this install's own bootstrap.
+    """
+    if len(argv) < 4 or not os.path.basename(argv[0]).startswith("python"):
+        return None
+    if "-c" not in argv[1:3]:
+        return None
+    from gateway.status_inline_source import inline_bootstrap_argv
+
+    rebuilt = inline_bootstrap_argv(argv)  # [<python>, "-m", <module>, *backend argv]
+    if not rebuilt or rebuilt[1:2] != ["-m"] or len(rebuilt) < 3:
+        return None
+    from hermes_cli._launchers import runtime_command
+
+    return runtime_command(root, rebuilt[3:], module=rebuilt[2])
 
 
 def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:

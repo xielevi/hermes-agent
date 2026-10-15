@@ -198,6 +198,9 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
     with _best_effort('Legacy unit check during update failed: %s'):
         _print_legacy_units_warning()
 
+    # Whether the owed work belongs to the gateway fleet: the restart phase may already have
+    # failed a unit (or aborted into recovery) before verification ran.
+    _gateway_owed = bool(restart.incomplete)
     # Restart a managed dashboard via systemd or stop stale manual ones (raw-killing
     # a systemd-owned PID reads as clean stop and leaves the Cloudflare origin dead).
     # Already-restarted units aren't redone.
@@ -246,6 +249,7 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
         _fleet_snapshot = _collect_fleet_snapshot(restart, _fleet_rows_expected)
         if print_fleet_version_matrix(_fleet_snapshot):
             restart.incomplete = True
+            _gateway_owed = True
             # A proven-stale survivor must not keep running (its ticker yields every tick and
             # nothing else restarts it, #117275): hand it to the drain-first restart path.
             from hermes_cli.update_cmd_stale_survivors import signal_stale_fleet_survivors
@@ -264,6 +268,7 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
                 " gateway runtimes were expected — verification incomplete."
             )
             restart.incomplete = True
+            _gateway_owed = True
 
     # Every runtime the PLAN saw must appear in restart bookkeeping; an
     # unaccounted one is a silent miss and escalates like a STALE/DOWN row.
@@ -307,6 +312,7 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
                     outcome["outcome"] = "deferred"
             if report_unaccounted_runtimes(_runtime_outcomes):
                 restart.incomplete = True
+                _gateway_owed = True  # the plan's gateway rows are the ones messages depend on
             with suppress(Exception):
                 import hermes_cli.update_receipt as _ur
                 _active = _ur._current.get()
@@ -320,22 +326,35 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
                 # live to restart this time): keep owing it rather than clearing the obligation.
                 print("  ⚠ A gateway owed a restart by a previous update is still not serving this checkout.")
                 restart.incomplete = True
+                _gateway_owed = True
     if getattr(restart, "stopped_unmapped_pids", None):
         # A gateway stopped with no successor is owed a restart, not "accounted for": keep the
         # fleet obligation armed so the startup warning names it until someone restarts it.
         restart.incomplete = True
+        _gateway_owed = True
     if restart.incomplete:
         # Code is committed (contract C3): a gateway that may still run stale modules is a
         # follow-up, never a failed update. The fleet obligation stays armed, every CLI start
         # warns about it, and the next `hermes update` retries the restart.
         from hermes_cli.update_receipt import record_followup
         stopped = sorted(getattr(restart, "stopped_unmapped_pids", None) or ())
-        record_followup(
-            "gateway_restart",
-            "gateways may still run pre-update code or were stopped without a successor"
-            + (f" (stopped PIDs {', '.join(map(str, stopped))})" if stopped else "")
-            + "; recover with `hermes gateway restart`",
-        )
+        if _dashboards_down and not _gateway_owed:
+            # Nothing gateway-shaped failed: the only owed work is a dashboard/serve backend the
+            # update stopped and could not bring back. Naming it `gateway_restart` would send the
+            # Desktop's reader after `hermes gateway restart`, which never touches a backend.
+            record_followup(
+                "dashboard_restart",
+                "a web dashboard/serve backend was stopped during the update and could not be brought back"
+                + f" (stopped PIDs {', '.join(map(str, sorted(_dashboards_down)))})"
+                + "; recover with `hermes dashboard --port <port>`",
+            )
+        else:
+            record_followup(
+                "gateway_restart",
+                "gateways may still run pre-update code or were stopped without a successor"
+                + (f" (stopped PIDs {', '.join(map(str, stopped))})" if stopped else "")
+                + "; recover with `hermes gateway restart`",
+            )
         with _best_effort('Fleet restart inventory not recorded: %s'):
             _record_owed_gateway_inventory(_pre_update_plan, stopped)
     with _best_effort('Update receipt finalize failed: %s'):
