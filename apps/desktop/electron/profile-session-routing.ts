@@ -64,6 +64,8 @@ export async function routeRemoteSessionRequest(
   let profile = (searchParams.get('profile') || request.profile || '').trim()
 
   if (!profile) {
+    // No explicit owner hint (#85834): consult the remote lists that already tag each row's owner
+    // instead of falling through to the LOCAL backend, which 404s on its own state.db.
     profile = (await routes.remoteOwnerProfileForSession(decodeURIComponent(pathname.split('/')[3] || ''))) || ''
 
     if (!profile) {
@@ -71,12 +73,16 @@ export async function routeRemoteSessionRequest(
     }
   }
 
-  // Preserve non-profile read parameters; a remote alias replaces only the owner scope.
+  // Preserve every non-profile query param (limit/offset/order pagination — stripping them made
+  // getAllSessionMessages loop the same default page against paginating remote backends).
   const passthroughParams = new URLSearchParams(searchParams)
   passthroughParams.delete('profile')
   const passthroughQuery = passthroughParams.toString()
 
   if (routes.profileHasRemoteOverride(profile)) {
+    // #64999: the override's remote can be a multi-profile backend — an unscoped read opens its
+    // launch-profile state.db. Scope it like the list fetch; a legacy single-profile scope ('')
+    // keeps the path bare.
     const ownerScope = routes.ownerScopeForProfile(profile)
 
     if (method === 'GET') {
@@ -96,6 +102,7 @@ export async function routeRemoteSessionRequest(
   }
 
   if (routes.globalRemoteActive()) {
+    // Single global backend serves every profile: keep ?profile= so it opens the right state.db.
     passthroughParams.set('profile', profile)
     const path = `${pathname}?${passthroughParams.toString()}`
 
