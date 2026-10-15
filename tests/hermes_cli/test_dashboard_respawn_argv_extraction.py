@@ -70,3 +70,107 @@ def test_an_unrelated_argv_still_replays_unchanged(tmp_path):
 
     argv = [sys.executable, "-m", "hermes_cli.main", "serve", "--port", "9119"]
     assert _respawnable_command_for_current_install(argv) == argv
+
+
+def test_actual_macos_ps_escaped_fixtures_rebuild_cleanly(tmp_path):
+    """macOS ps escapes newlines as \\012, which shlex unescapes to literal 012."""
+    from hermes_cli._launchers import _launcher_script
+    from hermes_cli.main_dashboard import _respawnable_command_for_current_install
+
+    source = _launcher_script("hermes", tmp_path, None)
+    expected_tail = ["dashboard", "--host", "127.0.0.1", "--port", "9119", "--no-open"]
+
+    for name, src in [
+        ("backslash012", source.replace("\n", "\\012")),
+        ("literal012", source.replace("\n", "012")),
+    ]:
+        real = [sys.executable, "-I", "-c", src, *expected_tail]
+        ps_line = " ".join(real)
+        try:
+            captured = shlex.split(ps_line)
+        except ValueError:
+            captured = ps_line.split()
+        command = _respawnable_command_for_current_install(captured)
+        assert command[:3] == [command[0], "-I", "-c"], f"Failed on {name}"
+        assert command[4:] == expected_tail, f"Failed tail on {name}"
+        compile(command[3], "<bootstrap>", "exec")
+
+
+def test_runtime_bootstrap_rebuilds_cleanly(tmp_path):
+    """A single-line runtime_command bootstrap captured through ps rebuilds cleanly."""
+    from hermes_cli._launchers import runtime_command
+    from hermes_cli.main_dashboard import _respawnable_command_for_current_install
+
+    real = runtime_command(tmp_path, ["dashboard", "--no-open"])
+    ps_line = " ".join(real)
+    captured = shlex.split(ps_line)
+    command = _respawnable_command_for_current_install(captured)
+    assert command[:3] == [command[0], "-I", "-c"]
+    assert command[4:] == ["dashboard", "--no-open"]
+    compile(command[3], "<bootstrap>", "exec")
+
+
+def test_venv_sync_bootstrap_rebuilds_cleanly(tmp_path):
+    """A venv_sync relaunch bootstrap captured through ps rebuilds cleanly."""
+    from pathlib import Path
+    from hermes_cli.main_dashboard import _respawnable_command_for_current_install
+    from hermes_cli.venv_sync import relaunch_command
+
+    real = relaunch_command(
+        Path(sys.executable),
+        tmp_path,
+        ["hermes", "dashboard", "--no-open"],
+        [sys.executable, "hermes", "dashboard", "--no-open"],
+        "hermes_cli.main",
+    )
+    ps_line = " ".join(real)
+    captured = shlex.split(ps_line)
+    command = _respawnable_command_for_current_install(captured)
+    assert command[:3] == [command[0], "-I", "-c"]
+    assert command[4:] == ["dashboard", "--no-open"]
+    compile(command[3], "<bootstrap>", "exec")
+
+
+def test_already_exact_argv_preserves_backend_args(tmp_path):
+    """An exact argv (e.g. from Linux /proc) is rebuilt without mangling backend arguments."""
+    from hermes_cli._launchers import _launcher_script
+    from hermes_cli.main_dashboard import _respawnable_command_for_current_install
+
+    src = _launcher_script("hermes", tmp_path, None)
+    exact = [sys.executable, "-I", "-c", src, "dashboard", "--no-open"]
+    command = _respawnable_command_for_current_install(exact)
+    assert command[:3] == [command[0], "-I", "-c"]
+    assert command[4:] == ["dashboard", "--no-open"]
+    compile(command[3], "<bootstrap>", "exec")
+
+
+def test_unrelated_inline_script_replays_unchanged():
+    """An unrelated inline script must not be matched or rebuilt."""
+    from hermes_cli.main_dashboard import _respawnable_command_for_current_install
+
+    argv = [sys.executable, "-c", "import time; time.sleep(1)", "dashboard", "--no-open"]
+    assert _respawnable_command_for_current_install(argv) == argv
+
+
+def test_spaces_in_root_and_args_rebuild_without_corruption(tmp_path):
+    """Spaces in root path and backend arguments (including embedded 012 in numbers) survive."""
+    from pathlib import Path
+    from hermes_cli._launchers import _launcher_script
+    from hermes_cli.main_dashboard import _respawnable_command_for_current_install
+
+    root_with_spaces = tmp_path / "hermes install dir"
+    root_with_spaces.mkdir()
+    src = _launcher_script("hermes", root_with_spaces, None)
+    expected_tail = ["dashboard", "--port", "9012", "--title", "My Great Dashboard", "--no-open"]
+
+    for name, escaped_src in [
+        ("backslash012", src.replace("\n", "\\012")),
+        ("literal012", src.replace("\n", "012")),
+    ]:
+        real = [sys.executable, "-I", "-c", escaped_src, *expected_tail]
+        ps_line = shlex.join(real)
+        captured = shlex.split(ps_line)
+        command = _respawnable_command_for_current_install(captured)
+        assert command[:3] == [command[0], "-I", "-c"], f"Failed on {name}"
+        assert command[4:] == expected_tail, f"Failed tail on {name}"
+        compile(command[3], "<bootstrap>", "exec")

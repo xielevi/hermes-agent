@@ -97,6 +97,8 @@ _EXEC_LAUNCHER = re.compile(
     # no ``\b`` before ``from``/``sys``: an escaped newline normalizes to ``/n`` and abuts them
     r"import os, re, sys\W.*?from\s+(?P<target>[\w.]+)\s+import\s+(?P<func>\w+)\b.*sys\.exit\(\s*(?P=func)\(\)\s*\)", re.DOTALL)
 _EXEC_BASE64 = re.compile(r"import base64; exec\(base64\.b64decode\(\W*(?P<b64>[A-Za-z0-9+/=]+)")
+_CANDIDATE_BOOTSTRAP_END = re.compile(r"\)(?:\\012|012|\s)*$")
+_MACOS_PS_OCTAL_NEWLINE = re.compile(r"\\012|012")
 
 
 def _bootstrap_entry(source: str, argv: list[str]) -> list[str] | None:
@@ -148,8 +150,13 @@ def inline_bootstrap_argv(tokens: list[str]) -> list[str] | None:
     if index is None:
         return None
     for end in range(index + 1, len(tokens)):
-        if tokens[end].rstrip().endswith(")"):
-            entry = _bootstrap_entry(" ".join(tokens[index + 1 : end + 1]), tokens[end + 1 :])
-            if entry is not None:
-                return [tokens[0], *entry]
+        token = tokens[end]
+        if not (token.rstrip().endswith(")") or _CANDIDATE_BOOTSTRAP_END.search(token)):
+            continue
+        candidate = " ".join(tokens[index + 1 : end + 1])
+        entry = _bootstrap_entry(candidate, tokens[end + 1 :])
+        if entry is None and ("\\012" in candidate or "012" in candidate):
+            entry = _bootstrap_entry(_MACOS_PS_OCTAL_NEWLINE.sub("\n", candidate), tokens[end + 1 :])
+        if entry is not None:
+            return [tokens[0], *entry]
     return None
