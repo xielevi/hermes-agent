@@ -29,7 +29,7 @@ const REMOTE_SESSION_PAGE_LIMIT = 100
 
 /** The snapshot that fences a session edit belongs to the same remote as the edit itself. */
 export function isRemoteSessionRequestPath(pathname: string): boolean {
-  return /^\/api\/sessions\/[^/]+(?:\/(?:messages|mutation-snapshot))?$/.test(pathname)
+  return /^\/api\/sessions\/[^/]+(?:\/(?:messages(?:\/around)?|timeline|mutation-snapshot))?$/.test(pathname)
 }
 
 interface RemoteSessionRequest {

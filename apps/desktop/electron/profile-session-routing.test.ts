@@ -18,6 +18,7 @@ import {
   mergeProfileSessionWindow,
   pathWithRemoteOwnerScope,
   remoteProfileQueryScope,
+  routeRemoteSessionRequest,
   settleRemoteProfileSessions,
   shouldIncludeLocalRegistrySessionSource,
   spliceRegistrySessionRows,
@@ -26,11 +27,12 @@ import {
 } from './profile-session-routing'
 
 test('the fencing snapshot follows its session read and write, without widening unrelated routes', () => {
-  for (const pathname of ['/api/sessions/chat', '/api/sessions/chat/messages', '/api/sessions/chat/mutation-snapshot']) {
+  for (const pathname of ['/api/sessions/chat', '/api/sessions/chat/messages', '/api/sessions/chat/mutation-snapshot',
+    '/api/sessions/chat/timeline', '/api/sessions/chat/messages/around']) {
     assert.equal(isRemoteSessionRequestPath(pathname), true)
   }
 
-  for (const pathname of ['/api/sessions', '/api/sessions/chat/timeline', '/api/sessions/chat/export',
+  for (const pathname of ['/api/sessions', '/api/sessions/chat/timeline/extra', '/api/sessions/chat/export',
     '/api/sessions/chat/mutation-snapshot/extra', '/api/profiles/sessions']) {
     assert.equal(isRemoteSessionRequestPath(pathname), false)
   }
@@ -1183,4 +1185,45 @@ test('all-profiles cron list merges one read per profile like the gateway', asyn
   assert.deepEqual(reads.sort(), ['/api/cron/jobs?profile=broken', '/api/cron/jobs?profile=default', '/api/cron/jobs?profile=work'])
   // A duplicate keeps its first position but the default profile's copy; id-less jobs never fold.
   assert.deepEqual(jobs.map(job => `${job.id}:${job.profile ?? job.name}`), ['shared:default', 'w:work', 'unknown:w-orphan', 'unknown:d-orphan'])
+})
+
+
+test.each(['global', 'profile-override'])('legacy %s routes timeline and anchored messages to the session owner', async mode => {
+  const calls: Array<{ profile: string | null; path: string }> = []
+
+  const routes = {
+    remoteOwnerProfileForSession: async () => 'remote-work',
+    profileHasRemoteOverride: () => mode === 'profile-override',
+    ownerScopeForProfile: () => 'work',
+    globalRemoteActive: () => mode === 'global',
+    fetchJsonForProfile: async (profile: string | null, path: string) => {
+      calls.push({ profile, path })
+
+      return { remote: true }
+    },
+    requestJsonForProfile: async () => { throw new Error('read must not issue a mutation') }
+  }
+
+  for (const suffix of ['timeline', 'messages/around']) {
+    // An unhinted session must discover the same owner; an explicit hint follows the same route.
+    for (const profile of [undefined, 'remote-work']) {
+      const result = await routeRemoteSessionRequest({
+        path: `/api/sessions/chat/${suffix}?message_id=anchor&limit=20`, profile
+      }, routes)
+
+      assert.deepEqual(result, { remote: true })
+      const call = calls[calls.length - 1]
+      const url = new URL(call.path, 'http://desktop.test')
+      assert.equal(call.profile, mode === 'global' ? null : 'remote-work')
+      assert.equal(url.pathname, `/api/sessions/chat/${suffix}`)
+      assert.equal(url.searchParams.get('profile'), mode === 'global' ? 'remote-work' : 'work')
+      assert.equal(url.searchParams.get('message_id'), 'anchor')
+      assert.equal(url.searchParams.get('limit'), '20')
+    }
+  }
+
+  assert.equal(await routeRemoteSessionRequest({ path: '/api/sessions/chat/timeline', profile: 'default' }, {
+    ...routes, profileHasRemoteOverride: () => false, globalRemoteActive: () => false
+  }), undefined)
+  assert.equal(calls.length, 4) // local fallthrough did not dispatch to a remote
 })
