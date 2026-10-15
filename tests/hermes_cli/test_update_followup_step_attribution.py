@@ -28,7 +28,7 @@ def _plan(runtimes=None):
     return types.SimpleNamespace(runtimes=runtimes or [])
 
 
-def _verify(monkeypatch, tmp_path, *, dashboards_down, fleet_rows, plan=None, restart=None):
+def _verify(monkeypatch, tmp_path, *, dashboards_down, fleet_rows, plan=None, restart=None, named_owed=False):
     """Run the real post-restart verification with every external probe mocked."""
     from hermes_cli import main, update_cmd, update_cmd_fleet as fleet, update_cmd_fleet_verify as fleet_verify
     from hermes_cli import update_receipt
@@ -41,6 +41,7 @@ def _verify(monkeypatch, tmp_path, *, dashboards_down, fleet_rows, plan=None, re
     monkeypatch.setattr("hermes_cli.update_inventory.report_unaccounted_runtimes", lambda rows: False)
     monkeypatch.setattr("hermes_cli.gateway_migrate.maybe_auto_migrate_after_update", lambda: None)
     monkeypatch.setattr(update_receipt, "collect_fleet_versions", lambda **kw: list(fleet_rows))
+    monkeypatch.setattr(fleet_verify, "_named_gateways_still_owed", lambda: named_owed)
     cleared = []
     monkeypatch.setattr(fleet, "_clear_fleet_restart_pending_marker", lambda: cleared.append(True))
     outcome = restart if restart is not None else fleet._GatewayRestartOutcome(
@@ -66,7 +67,7 @@ def test_dashboard_only_failure_is_not_reported_as_a_gateway_restart(monkeypatch
     dashboard/serve cleanup. The follow-up must name the dashboard, so the Desktop
     hands the user a remedy that can actually repair it.
     """
-    receipt, outcome, _cleared = _verify(monkeypatch, tmp_path, dashboards_down=[9119],
+    receipt, outcome, cleared = _verify(monkeypatch, tmp_path, dashboards_down=[9119],
                                          fleet_rows=_CURRENT_FLEET)
     assert receipt["outcome"] == "success"  # contract C3: the code committed
     assert outcome.incomplete is True  # a promised restart did not happen
@@ -74,6 +75,7 @@ def test_dashboard_only_failure_is_not_reported_as_a_gateway_restart(monkeypatch
     printed = capsys.readouterr().out
     assert "Update follow-up 'dashboard_restart' did not finish" in printed
     assert "hermes dashboard" in receipt["followups"][0]["reason"]
+    assert cleared == [True]  # dashboard debt must not leave a gateway startup warning
 
 
 def test_a_gateway_failure_stays_a_gateway_restart(monkeypatch, tmp_path):
@@ -104,7 +106,7 @@ def test_a_dashboard_failure_beside_a_gateway_failure_is_still_a_gateway_restart
     )
     receipt, _outcome, _cleared = _verify(monkeypatch, tmp_path, dashboards_down=[9119],
                                           fleet_rows=_CURRENT_FLEET, restart=both)
-    assert [f["step"] for f in receipt["followups"]] == ["gateway_restart"]
+    assert [f["step"] for f in receipt["followups"]] == ["dashboard_restart", "gateway_restart"]
 
 
 def test_a_clean_run_records_no_followup(monkeypatch, tmp_path):
@@ -115,3 +117,10 @@ def test_a_clean_run_records_no_followup(monkeypatch, tmp_path):
     assert receipt.get("followups", []) == []
     assert outcome.incomplete is False
     assert cleared == [True]
+
+
+def test_dashboard_failure_does_not_discharge_a_standing_gateway_obligation(monkeypatch, tmp_path):
+    receipt, _outcome, cleared = _verify(monkeypatch, tmp_path, dashboards_down=[9119],
+                                       fleet_rows=_CURRENT_FLEET, named_owed=True)
+    assert [followup["step"] for followup in receipt["followups"]] == ["dashboard_restart", "gateway_restart"]
+    assert cleared == []
