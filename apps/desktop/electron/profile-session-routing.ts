@@ -27,6 +27,90 @@ type FetchJsonForProfile = (profile: string | null, path: string) => Promise<unk
 
 const REMOTE_SESSION_PAGE_LIMIT = 100
 
+/** The snapshot that fences a session edit belongs to the same remote as the edit itself. */
+export function isRemoteSessionRequestPath(pathname: string): boolean {
+  return /^\/api\/sessions\/[^/]+(?:\/(?:messages|mutation-snapshot))?$/.test(pathname)
+}
+
+interface RemoteSessionRequest {
+  path: string
+  method?: string
+  profile?: string
+  body?: unknown
+}
+
+interface RemoteSessionRouteDependencies {
+  remoteOwnerProfileForSession: (sessionId: string) => Promise<string | null>
+  profileHasRemoteOverride: (profile: string) => boolean
+  ownerScopeForProfile: (profile: string) => string
+  globalRemoteActive: () => boolean
+  fetchJsonForProfile: (profile: string | null, path: string) => Promise<unknown>
+  requestJsonForProfile: (profile: string | null, path: string, method: string, body: unknown) => Promise<unknown>
+}
+
+/** Keep the snapshot and mutation on one legacy remote authority; undefined keeps the local fast path. */
+export async function routeRemoteSessionRequest(
+  request: RemoteSessionRequest,
+  routes: RemoteSessionRouteDependencies
+): Promise<unknown> {
+  const parsed = new URL(request.path, 'http://desktop.local')
+  const { pathname, searchParams } = parsed
+
+  if (!isRemoteSessionRequestPath(pathname)) {
+    return undefined
+  }
+
+  const method = (request.method || 'GET').toUpperCase()
+  let profile = (searchParams.get('profile') || request.profile || '').trim()
+
+  if (!profile) {
+    profile = (await routes.remoteOwnerProfileForSession(decodeURIComponent(pathname.split('/')[3] || ''))) || ''
+
+    if (!profile) {
+      return undefined
+    }
+  }
+
+  // Preserve non-profile read parameters; a remote alias replaces only the owner scope.
+  const passthroughParams = new URLSearchParams(searchParams)
+  passthroughParams.delete('profile')
+  const passthroughQuery = passthroughParams.toString()
+
+  if (routes.profileHasRemoteOverride(profile)) {
+    const ownerScope = routes.ownerScopeForProfile(profile)
+
+    if (method === 'GET') {
+      return routes.fetchJsonForProfile(
+        profile,
+        pathWithRemoteOwnerScope(passthroughQuery ? `${pathname}?${passthroughQuery}` : pathname, ownerScope)
+      )
+    }
+
+    const body = request.body && typeof request.body === 'object' ? { ...request.body } : request.body
+
+    if (body && ownerScope) {
+      ;(body as Record<string, unknown>).profile = ownerScope
+    }
+
+    return routes.requestJsonForProfile(profile, pathname, method, body)
+  }
+
+  if (routes.globalRemoteActive()) {
+    passthroughParams.set('profile', profile)
+    const path = `${pathname}?${passthroughParams.toString()}`
+
+    if (method === 'GET') {
+      return routes.fetchJsonForProfile(null, path)
+    }
+
+    const body = request.body && typeof request.body === 'object' ? { ...request.body, profile } : { profile }
+
+    return routes.requestJsonForProfile(null, path, method, body)
+  }
+
+  return undefined
+}
+
 /** Whether a read asks for the cross-profile Sessions list used by grouping. */
 export function isAllProfilesSessionListRequest(method: string | undefined, path: string | undefined): boolean {
   if ((method || 'GET').toUpperCase() !== 'GET' || !path) {

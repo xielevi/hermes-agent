@@ -14,6 +14,7 @@ import {
   hasPinnedRegistrySessionSource,
   isAllProfilesAggregateRequest,
   isAllProfilesSessionListRequest,
+  isRemoteSessionRequestPath,
   mergeProfileSessionWindow,
   pathWithRemoteOwnerScope,
   remoteProfileQueryScope,
@@ -23,6 +24,17 @@ import {
   tagRegistrySessionResponse,
   tagRemoteSessionRows
 } from './profile-session-routing'
+
+test('the fencing snapshot follows its session read and write, without widening unrelated routes', () => {
+  for (const pathname of ['/api/sessions/chat', '/api/sessions/chat/messages', '/api/sessions/chat/mutation-snapshot']) {
+    assert.equal(isRemoteSessionRequestPath(pathname), true)
+  }
+
+  for (const pathname of ['/api/sessions', '/api/sessions/chat/timeline', '/api/sessions/chat/export',
+    '/api/sessions/chat/mutation-snapshot/extra', '/api/profiles/sessions']) {
+    assert.equal(isRemoteSessionRequestPath(pathname), false)
+  }
+})
 
 test('all-profiles session routing is limited to read-only list endpoints', () => {
   assert.equal(isAllProfilesSessionListRequest('GET', '/api/profiles/sessions?profile=all'), true)

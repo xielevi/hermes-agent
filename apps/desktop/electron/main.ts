@@ -472,9 +472,9 @@ import {
   hasPinnedRegistrySessionSource,
   isAllProfilesAggregateRequest,
   isAllProfilesSessionListRequest,
-  pathWithRemoteOwnerScope,
   type RegistrySessionSource,
   remoteProfileQueryScope,
+  routeRemoteSessionRequest,
   settleRemoteProfileSessions,
   shouldIncludeLocalRegistrySessionSource,
   spliceRegistrySessionRows,
@@ -16069,81 +16069,15 @@ async function interceptSessionRequestForRemote(request, registryConnectionId = 
     return assembleSidebarSessionSlices(recents, cron, messaging)
   }
 
-  // Per-session read/mutation. Owner is in ?profile= (reads) or request.profile
-  // (mutations). Two remote shapes:
-  //  - per-profile override: route to that profile's own remote, sans profile
-  //    param (it serves its own state.db natively).
-  //  - global remote mode: ONE backend serves every profile via ?profile=, so
-  //    route there and KEEP the profile param so it opens the right state.db.
-  if (/^\/api\/sessions\/[^/]+(\/messages)?$/.test(pathname)) {
-    let profile = (searchParams.get('profile') || request.profile || '').trim()
-
-    if (!profile) {
-      // No explicit owner hint (#85834). The list endpoints above already know
-      // which remote profile owns each row (remoteSessionList tags s.profile),
-      // but a caller without a hint used to fall straight through to the LOCAL
-      // backend and 404 on its state.db even though the session lives on a
-      // remote. Consult the same remote lists to find the owner; only fall
-      // through when the id is genuinely unknown remotely.
-      const sessionId = decodeURIComponent(pathname.split('/')[3] || '')
-      profile = (await remoteOwnerProfileForSession(sessionId)) || ''
-
-      if (!profile) {
-        return undefined
-      }
-    }
-
-    // Preserve every non-profile query param (limit/offset/order pagination —
-    // stripping them made getAllSessionMessages loop the same default page
-    // against paginating remote backends).
-    const passthroughParams = new URLSearchParams(searchParams)
-    passthroughParams.delete('profile')
-    const passthroughQuery = passthroughParams.toString()
-
-    if (profileHasRemoteOverride(profile)) {
-      // #64999: the override's remote can be a multi-profile backend — an
-      // unscoped read opens its launch-profile state.db, so a resume 4007s
-      // even though the row exists under its real owner. Scope the read the
-      // same way the list fetch does; a legacy single-profile scope ('')
-      // keeps the path bare.
-      const ownerScope =
-        remoteProfileQueryScope(profile, profileSshOverride(readDesktopConnectionConfig(), profile)?.remoteProfile) ||
-        profile
-
-      if (method === 'GET') {
-        return fetchJsonForProfile(
-          profile,
-          pathWithRemoteOwnerScope(passthroughQuery ? `${pathname}?${passthroughQuery}` : pathname, ownerScope)
-        )
-      }
-
-      const body = request.body && typeof request.body === 'object' ? { ...request.body } : request.body
-
-      if (body && ownerScope) {
-        ;(body as Record<string, unknown>).profile = ownerScope
-      }
-
-      return requestJsonForProfile(profile, pathname, method, body)
-    }
-
-    if (globalRemoteActive()) {
-      // Single global backend: keep ?profile= so it opens the right state.db.
-      passthroughParams.set('profile', profile)
-      const path = `${pathname}?${passthroughParams.toString()}`
-
-      if (method === 'GET') {
-        return fetchJsonForProfile(null, path)
-      }
-
-      const body = request.body && typeof request.body === 'object' ? { ...request.body, profile } : { profile }
-
-      return requestJsonForProfile(null, path, method, body)
-    }
-
-    return undefined
-  }
-
-  return undefined
+  return routeRemoteSessionRequest(request, {
+    remoteOwnerProfileForSession,
+    profileHasRemoteOverride,
+    ownerScopeForProfile: profile =>
+      remoteProfileQueryScope(profile, profileSshOverride(readDesktopConnectionConfig(), profile)?.remoteProfile) || profile,
+    globalRemoteActive,
+    fetchJsonForProfile,
+    requestJsonForProfile
+  })
 }
 
 const rowsOf = data => (Array.isArray(data?.sessions) ? data.sessions : [])
